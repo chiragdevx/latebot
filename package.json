@@ -9,9 +9,9 @@
     "migration:generate": "npm run typeorm -- -d ./db/typeorm.config.ts migration:generate ./db/migrations/migration",
     "dev": "nodemon src/index.ts",
     "watch": "tsc -w",
-    "migrate": "npx node-pg-migrate",
-    "migrate:up": "npx node-pg-migrate up",
-    "migrate:down": "npx node-pg-migrate down"
+    "migrate": "npx node-pg-migrate --migrations-dir src/db/migrations",
+    "migrate:up": "npx node-pg-migrate up --migrations-dir src/db/migrations",
+    "migrate:down": "npx node-pg-migrate down --migrations-dir src/db/migrations"
   },
   "author": "",
   "license": "ISC",
