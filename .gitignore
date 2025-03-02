@@ -1,6 +1,31 @@
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+/bin/
+
+# Environment variables
 .env
-node_modules/
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
 *.log
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+node_modules/
 *.env.local
 *.env.development.local
 *.env.test.local
