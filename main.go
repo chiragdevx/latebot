@@ -102,7 +102,16 @@ func (a *App) handleMessage(ev *slack.MessageEvent) {
 	}
 	a.processedMsgs[ev.Timestamp] = true
 
-	if ev.SubType != "" {
+	// Skip bot messages and system messages
+	if ev.SubType != "" || ev.BotID != "" {
+		logger.Debug("Skipping bot/system message")
+		return
+	}
+
+	// Skip our own messages
+	authTest, err := a.slackClient.AuthTest()
+	if err == nil && ev.User == authTest.UserID {
+		logger.Debug("Skipping our own message")
 		return
 	}
 
@@ -120,7 +129,16 @@ func (a *App) handleMessage(ev *slack.MessageEvent) {
 	}
 
 	if !response.IsValid {
-		log.Printf("Not a leave request")
+		// If there's a validation error, inform the user
+		if response.Error != "" {
+			_, _, err = a.slackClient.PostMessage(ev.Channel, slack.MsgOptionText(
+				fmt.Sprintf("❌ Unable to process leave request: %s", response.Error),
+				false,
+			))
+			if err != nil {
+				log.Printf("Error sending error message: %v", err)
+			}
+		}
 		return
 	}
 
@@ -271,9 +289,19 @@ func handleSocketModeEvents(client *socketmode.Client, app *App) {
 				innerEvent := eventsAPIEvent.InnerEvent
 				switch ev := innerEvent.Data.(type) {
 				case *slackevents.MessageEvent:
+					// Skip non-user messages
 					if ev.SubType != "" || ev.BotID != "" || ev.ThreadTimeStamp != "" {
+						logger.Debug("Skipping non-user message")
 						continue
 					}
+
+					// Skip our own messages
+					authTest, err := app.slackClient.AuthTest()
+					if err == nil && ev.User == authTest.UserID {
+						logger.Debug("Skipping our own message")
+						continue
+					}
+
 					logger.Debug("Message from %s: %s", ev.User, ev.Text)
 					messageEvent := &slack.MessageEvent{
 						Msg: slack.Msg{
