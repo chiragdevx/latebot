@@ -1,0 +1,36 @@
+{
+  "name": "divs",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "migration:run": "npm run typeorm migration:run -- -d ./db/typeorm.config.ts",
+    "migration:generate": "npm run typeorm -- -d ./db/typeorm.config.ts migration:generate ./db/migrations/migration",
+    "dev": "nodemon src/index.ts",
+    "watch": "tsc -w",
+    "migrate": "npx node-pg-migrate",
+    "migrate:up": "npx node-pg-migrate up",
+    "migrate:down": "npx node-pg-migrate down"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@slack/bolt": "^4.2.0",
+    "dotenv": "^16.4.7",
+    "mongoose": "^8.10.1",
+    "openai": "^4.77.0",
+    "winston": "^3.17.0",
+    "zod": "^3.24.2",
+    "pg": "^8.11.3",
+    "node-pg-migrate": "^6.2.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "nodemon": "^3.1.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}
