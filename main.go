@@ -38,6 +38,7 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("error loading .env file: %v", err)
 	}
 
+
 	return &Config{
 		Port:               os.Getenv("PORT"),
 		SlackBotToken:      os.Getenv("SLACK_BOT_TOKEN"),
@@ -318,9 +319,150 @@ func handleSocketModeEvents(client *socketmode.Client, app *App) {
 			} else {
 				logger.Debug("Unhandled event type: %s", eventsAPIEvent.Type)
 			}
+		case socketmode.EventTypeSlashCommand:
+			cmd, ok := evt.Data.(slack.SlashCommand)
+			if !ok {
+				logger.Debug("Failed to cast slash command")
+				continue
+			}
+
+			client.Ack(*evt.Request)
+
+			switch cmd.Command {
+			case "/query":
+				go handleQueryCommand(app, cmd)
+			}
 		default:
 			logger.Debug("Unhandled event type: %v", evt.Type)
 		}
+	}
+}
+
+func handleQueryCommand(app *App, cmd slack.SlashCommand) {
+	// Parse the query using OpenAI
+	queryResp, err := app.openAI.ParseQuery(cmd.Text)
+	if err != nil {
+		logger.Error("Failed to parse query: %v", err)
+		return
+	}
+
+	if queryResp.Error != "" {
+		app.slackClient.PostEphemeral(
+			cmd.ChannelID,
+			cmd.UserID,
+			slack.MsgOptionText("❌ "+queryResp.Error, false),
+		)
+		return
+	}
+
+	var blocks []slack.Block
+	blocks = append(blocks, slack.NewHeaderBlock(
+		slack.NewTextBlockObject("plain_text", "📊 Leave Statistics Report", false, false),
+	))
+
+	switch queryResp.QueryType {
+	case "top_employee":
+		// Get employee with highest leaves
+		stat, err := app.leaveRepo.GetTopLeaveEmployee()
+		if err != nil {
+			logger.Error("Failed to get top leave employee: %v", err)
+			return
+		}
+
+		if stat == nil {
+			blocks = append(blocks, slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn", "No leave records found.", false, false),
+				nil, nil,
+			))
+		} else {
+			blocks = append(blocks, slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn",
+					fmt.Sprintf("👑 *Employee with Most Leaves*\n\n"+
+						"*%s*\n"+
+						"• Leave Count: %d\n"+
+						"• Types: %s\n"+
+						"• Total Hours: %.1f",
+						stat.Username,
+						stat.LeaveCount,
+						stat.LeaveTypes,
+						stat.TotalHours),
+					false, false),
+				nil, nil,
+			))
+		}
+
+	case "employee_stats":
+		// Get stats for specific employee
+		var stats []repository.LeaveStats
+		stats, err := app.leaveRepo.GetEmployeeStats(queryResp.Username)
+		if err != nil {
+			logger.Error("Failed to get employee stats: %v", err)
+			return
+		}
+
+		if len(stats) == 0 {
+			blocks = append(blocks, slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn",
+					fmt.Sprintf("No leave records found for *%s*.", queryResp.Username),
+					false, false),
+				nil, nil,
+			))
+		} else {
+			// Format employee stats
+			// ... format blocks for employee stats ...
+		}
+
+	case "period_stats":
+		// Use the dates from query response
+		startDate := queryResp.StartDate
+		endDate := queryResp.EndDate
+
+		var stats []repository.LeaveStats
+		stats, err := app.leaveRepo.GetLeaveStatsByPeriod(startDate, endDate)
+		if err != nil {
+			logger.Error("Failed to get leave stats: %v", err)
+			return
+		}
+
+		blocks = append(blocks, slack.NewSectionBlock(
+			slack.NewTextBlockObject("mrkdwn",
+				fmt.Sprintf("*Period:* %s to %s",
+					startDate.Format("Jan 2, 2006"),
+					endDate.Format("Jan 2, 2006")),
+				false, false),
+			nil, nil,
+		))
+
+		for _, stat := range stats {
+			blocks = append(blocks, slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn",
+					fmt.Sprintf("*%s*\n"+
+						"• Leave Count: %d\n"+
+						"• Types: %s\n"+
+						"• Total Hours: %.1f",
+						stat.Username,
+						stat.LeaveCount,
+						stat.LeaveTypes,
+						stat.TotalHours),
+					false, false),
+				nil, nil,
+			))
+		}
+	}
+
+	// Post the message
+	_, _, err = app.slackClient.PostMessage(
+		cmd.ChannelID,
+		slack.MsgOptionBlocks(blocks...),
+	)
+
+	if err != nil {
+		logger.Error("Failed to post query response: %v", err)
+		app.slackClient.PostEphemeral(
+			cmd.ChannelID,
+			cmd.UserID,
+			slack.MsgOptionText("❌ Failed to get leave statistics", false),
+		)
 	}
 }
 
@@ -350,6 +492,57 @@ func (a *App) handleLeaveRequest(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func (a *App) handleLeaveQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Query string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Get the current time in IST
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	now := time.Now().In(loc)
+
+	// Default to last month
+	startDate := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, loc)
+	endDate := startDate.AddDate(0, 1, 0).Add(-time.Second)
+
+	// Get leave statistics
+	stats, err := a.leaveRepo.GetLeaveStatsByPeriod(startDate, endDate)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Format response
+	response := struct {
+		Period struct {
+			Start string `json:"start"`
+			End   string `json:"end"`
+		} `json:"period"`
+		Stats []repository.LeaveStats `json:"stats"`
+	}{
+		Period: struct {
+			Start string `json:"start"`
+			End   string `json:"end"`
+		}{
+			Start: startDate.Format("2006-01-02"),
+			End:   endDate.Format("2006-01-02"),
+		},
+		Stats: stats,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 func main() {
 	logger.Info("Starting application... 🚀")
 
@@ -369,8 +562,9 @@ func main() {
 
 	app := NewApp(config, db)
 
-	// Add HTTP endpoint
+	// Add HTTP endpoints
 	http.HandleFunc("/api/leave", app.handleLeaveRequest)
+	http.HandleFunc("/api/leave/query", app.handleLeaveQuery)
 	go http.ListenAndServe(":"+config.Port, nil)
 
 	if err := setupSocketModeHandler(app, config); err != nil {

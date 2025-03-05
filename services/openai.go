@@ -22,6 +22,14 @@ type LeaveResponse struct {
 	Error     string    `json:"error,omitempty"` // Add error field for validation messages
 }
 
+type QueryResponse struct {
+	QueryType string    `json:"query_type"` // "top_employee", "period_stats", "employee_stats", etc.
+	StartDate time.Time `json:"start_date"` // For period-based queries
+	EndDate   time.Time `json:"end_date"`   // For period-based queries
+	Username  string    `json:"username"`   // For employee-specific queries
+	Error     string    `json:"error"`      // Any parsing errors
+}
+
 type OpenAIService struct {
 	client *openai.Client
 	log    *log.Logger
@@ -70,41 +78,16 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	- For half day leave: set time to either 9:00 AM - 1:00 PM or 2:00 PM - 6:00 PM IST
 	- For WFH: set time to 9:00 AM - 6:00 PM IST
 
-	Return a raw JSON object with these fields (no markdown, no formatting):
+	Return a JSON object with these fields:
 	{
 		"is_valid": true/false,
 		"leave_type": "WFH/FULL_DAY/HALF_DAY/LATE_ARRIVAL/EARLY_DEPARTURE",
-		"start_time": "` + today.Format("2006-01-02") + `T09:00:00+05:30",
-		"end_time": "` + today.Format("2006-01-02") + `T18:00:00+05:30",
+		"start_time": "2024-03-01T09:00:00+05:30",
+		"end_time": "2024-03-01T18:00:00+05:30",
 		"duration": "9 hours",
 		"reason": "reason for leave",
 		"error": "error message if validation fails"
-	}
-
-	Example responses:
-	For "wfh tomorrow":
-	{
-		"is_valid": true,
-		"leave_type": "WFH",
-		"start_time": "` + tomorrow.Format("2006-01-02") + `T09:00:00+05:30",
-		"end_time": "` + tomorrow.Format("2006-01-02") + `T18:00:00+05:30",
-		"duration": "9 hours",
-		"reason": "Working from home tomorrow"
-	}
-
-	For "half day leave tomorrow morning":
-	{
-		"is_valid": true,
-		"leave_type": "HALF_DAY",
-		"start_time": "` + tomorrow.Format("2006-01-02") + `T09:00:00+05:30",
-		"end_time": "` + tomorrow.Format("2006-01-02") + `T13:00:00+05:30",
-		"duration": "4 hours",
-		"reason": "Half day leave in morning"
-	}
-
-	If the message is not a leave request, return only {"is_valid": false} without any formatting or markdown`
-
-	s.log.Printf("Processing message: %s", text)
+	}`
 
 	resp, err := s.client.CreateChatCompletion(
 		context.Background(),
@@ -112,12 +95,12 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 			Model: "gpt-4o-mini",
 			Messages: []openai.ChatCompletionMessage{
 				{
-					Role:    openai.ChatMessageRoleUser,
-					Content: prompt,
-				},
-				{
 					Role:    openai.ChatMessageRoleSystem,
 					Content: "You are a JSON-only response bot. Never use markdown or code blocks. Return raw JSON only.",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
 				},
 			},
 			Temperature: 0.1,
@@ -129,12 +112,7 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	}
 
 	content := resp.Choices[0].Message.Content
-	// Remove any markdown formatting if present
-	content = strings.TrimPrefix(content, "```json")
-	content = strings.TrimSuffix(content, "```")
 	content = strings.TrimSpace(content)
-
-	s.log.Printf("Response: %s", content)
 
 	var leaveResp LeaveResponse
 	err = json.Unmarshal([]byte(content), &leaveResp)
@@ -176,4 +154,72 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	leaveResp.EndTime = leaveResp.EndTime.In(loc)
 
 	return &leaveResp, nil
+}
+
+func (s *OpenAIService) ParseQuery(query string) (*QueryResponse, error) {
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	now := time.Now().In(loc)
+
+	prompt := `Parse this leave statistics query and categorize it. Return a raw JSON object without any formatting.
+
+	Query: "` + query + `"
+	Current time: ` + now.Format(time.RFC3339) + `
+
+	Understand natural language queries like:
+	- "Who has taken the most leaves?"
+	- "Show me leave stats for last month"
+	- "How many leaves did John take?"
+	- "Give me the top 3 employees with most leaves"
+
+	IMPORTANT: Return ONLY the raw JSON object. Do not wrap it in code blocks. Do not use backticks. Do not use markdown.
+	BAD: { ... } in code blocks
+	GOOD: { ... }
+
+	Return a JSON object with these fields:
+	{
+		"query_type": one of ["top_employee", "period_stats", "employee_stats"],
+		"start_date": "2024-03-01T00:00:00+05:30",  // Optional, for period queries
+		"end_date": "2024-03-31T23:59:59+05:30",    // Optional, for period queries
+		"username": "john.doe",                      // Optional, for employee specific queries
+		"error": "error message if query cannot be understood"
+	}`
+
+	resp, err := s.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: "gpt-4o-mini",
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: "You are a JSON-only response bot. You must return raw JSON without any formatting, markdown, or code blocks. Never wrap JSON in backticks.",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+			Temperature: 0.1,
+		},
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %v", err)
+	}
+
+	content := resp.Choices[0].Message.Content
+	content = strings.ReplaceAll(content, "```json", "")
+	content = strings.ReplaceAll(content, "```", "")
+	content = strings.ReplaceAll(content, "`", "")
+	content = strings.ReplaceAll(content, "\n", "")
+	content = strings.ReplaceAll(content, "\r", "")
+	content = strings.TrimSpace(content)
+
+	s.log.Printf("Cleaned response: %s", content)
+
+	var queryResp QueryResponse
+	if err := json.Unmarshal([]byte(content), &queryResp); err != nil {
+		return nil, fmt.Errorf("JSON parse error: %v\nResponse: %s", err, content)
+	}
+
+	return &queryResp, nil
 }
