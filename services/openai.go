@@ -48,6 +48,7 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	now := time.Now().In(loc)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	tomorrow := today.AddDate(0, 0, 1)
+	maxFutureDate := today.AddDate(0, 0, 30)
 
 	prompt := `Parse this message for leave/attendance details. Return a JSON object only.
 
@@ -57,8 +58,10 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	Current context:
 	- Today's date: ` + today.Format("2006-01-02") + `
 	- Tomorrow's date: ` + tomorrow.Format("2006-01-02") + `
+	- Maximum allowed date: ` + maxFutureDate.Format("2006-01-02") + `
 	- Default work hours: 9:00 AM to 6:00 PM
 	- Timezone: Asia/Kolkata (IST)
+	- Current year: ` + fmt.Sprintf("%d", now.Year()) + `
 
 	Rules for leave_type:
 	- "WFH" for working from home
@@ -69,11 +72,16 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 
 	Important validation rules:
 	- Leave cannot be requested for past dates
+	- Leave cannot be requested for dates more than 30 days in advance
 	- Start time must be before end time
 	- If validation fails, set is_valid to false and include error message
 	- Use IST timezone (+05:30) for all dates
 	- For "today", use ` + today.Format("2006-01-02") + `
 	- For "tomorrow", use ` + tomorrow.Format("2006-01-02") + `
+	- For specific dates (e.g. "march 10"):
+	  * If the date is in the past this year, set is_valid to false with error
+	  * If the date is in the future this year but more than 30 days away, set is_valid to false with error
+	  * If the date is within next 30 days, use that date
 	- For full day leave: set time to 9:00 AM - 6:00 PM IST
 	- For half day leave: set time to either 9:00 AM - 1:00 PM or 2:00 PM - 6:00 PM IST
 	- For WFH: set time to 9:00 AM - 6:00 PM IST
@@ -96,7 +104,7 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a JSON-only response bot. Never use markdown or code blocks. Return raw JSON only.",
+					Content: "You are a date-aware JSON response bot. Use the current year for all dates. Never use markdown.",
 				},
 				{
 					Role:    openai.ChatMessageRoleUser,
@@ -134,13 +142,21 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	endTimeIST := leaveResp.EndTime.In(loc)
 	nowIST := now.In(loc)
 
-	// Compare dates only (ignore time) for past date validation
+	// Compare dates only (ignore time) for validation
 	startDate := time.Date(startTimeIST.Year(), startTimeIST.Month(), startTimeIST.Day(), 0, 0, 0, 0, loc)
 	todayDate := time.Date(nowIST.Year(), nowIST.Month(), nowIST.Day(), 0, 0, 0, 0, loc)
+	maxDate := todayDate.AddDate(0, 0, 30)
 
 	if startDate.Before(todayDate) {
 		leaveResp.IsValid = false
 		leaveResp.Error = "Cannot request leave for past dates"
+		return &leaveResp, nil
+	}
+
+	if startDate.After(maxDate) {
+		leaveResp.IsValid = false
+		leaveResp.Error = fmt.Sprintf("Cannot request leave more than 30 days in advance (maximum allowed date is %s)",
+			maxDate.Format("January 2, 2006"))
 		return &leaveResp, nil
 	}
 

@@ -38,7 +38,6 @@ func loadConfig() (*Config, error) {
 		return nil, fmt.Errorf("error loading .env file: %v", err)
 	}
 
-
 	return &Config{
 		Port:               os.Getenv("PORT"),
 		SlackBotToken:      os.Getenv("SLACK_BOT_TOKEN"),
