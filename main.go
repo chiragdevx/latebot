@@ -365,12 +365,8 @@ func handleQueryCommand(app *App, cmd slack.SlashCommand) {
 		stat, err := app.leaveRepo.GetTopLeaveEmployee()
 		if err != nil {
 			logger.Error("Failed to get top leave employee: %v", err)
-			return
-		}
-
-		if stat == nil {
 			blocks = append(blocks, slack.NewSectionBlock(
-				slack.NewTextBlockObject("mrkdwn", "No leave records found.", false, false),
+				slack.NewTextBlockObject("mrkdwn", "❌ "+err.Error(), false, false),
 				nil, nil,
 			))
 		} else {
@@ -392,23 +388,25 @@ func handleQueryCommand(app *App, cmd slack.SlashCommand) {
 
 	case "employee_stats":
 		// Get stats for specific employee
-		var stats []repository.LeaveStats
 		stats, err := app.leaveRepo.GetEmployeeStats(queryResp.Username)
 		if err != nil {
 			logger.Error("Failed to get employee stats: %v", err)
-			return
-		}
-
-		if len(stats) == 0 {
 			blocks = append(blocks, slack.NewSectionBlock(
-				slack.NewTextBlockObject("mrkdwn",
-					fmt.Sprintf("No leave records found for *%s*.", queryResp.Username),
-					false, false),
+				slack.NewTextBlockObject("mrkdwn", "❌ "+err.Error(), false, false),
 				nil, nil,
 			))
 		} else {
-			// Format employee stats
-			// ... format blocks for employee stats ...
+			if len(stats) == 0 {
+				blocks = append(blocks, slack.NewSectionBlock(
+					slack.NewTextBlockObject("mrkdwn",
+						fmt.Sprintf("No leave records found for *%s*. Please check if the username is correct or if they have taken any leave.", queryResp.Username),
+						false, false),
+					nil, nil,
+				))
+			} else {
+				// Format employee stats
+				// ... format blocks for employee stats ...
+			}
 		}
 
 	case "period_stats":
@@ -416,8 +414,21 @@ func handleQueryCommand(app *App, cmd slack.SlashCommand) {
 		startDate := queryResp.StartDate
 		endDate := queryResp.EndDate
 
+		// Parse the string dates back to time.Time
+		startDateParsed, err := time.Parse("2006-01-02", startDate)
+		if err != nil {
+			fmt.Printf("Error parsing start date: %v\n", err)
+			return
+		}
+
+		endDateParsed, err := time.Parse("2006-01-02", endDate)
+		if err != nil {
+			fmt.Printf("Error parsing end date: %v\n", err)
+			return
+		}
+
 		var stats []repository.LeaveStats
-		stats, err := app.leaveRepo.GetLeaveStatsByPeriod(startDate, endDate)
+		stats, err = app.leaveRepo.GetLeaveStatsByPeriod(startDateParsed, endDateParsed)
 		if err != nil {
 			logger.Error("Failed to get leave stats: %v", err)
 			return
@@ -426,8 +437,8 @@ func handleQueryCommand(app *App, cmd slack.SlashCommand) {
 		blocks = append(blocks, slack.NewSectionBlock(
 			slack.NewTextBlockObject("mrkdwn",
 				fmt.Sprintf("*Period:* %s to %s",
-					startDate.Format("Jan 2, 2006"),
-					endDate.Format("Jan 2, 2006")),
+					startDateParsed.Format("Jan 2, 2006"),
+					endDateParsed.Format("Jan 2, 2006")),
 				false, false),
 			nil, nil,
 		))

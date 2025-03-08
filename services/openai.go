@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,37 @@ import (
 
 	"github.com/sashabaranov/go-openai"
 )
+
+type Metrics struct {
+	Count     string `json:"count"`
+	Frequency string `json:"frequency"`
+}
+
+type QueryResponse struct {
+	QueryType       string   `json:"query_type"`         // "top_employee", "period_stats", "employee_stats", etc.
+	AnalysisSubtype string   `json:"analysis_subtype"`   // "most_leaves", "late_arrival_trend", etc.
+	StartDate       string   `json:"start_date"`         // Change to string for JSON response
+	EndDate         string   `json:"end_date"`           // Change to string for JSON response
+	Username        string   `json:"username,omitempty"` // Specific employee
+	Department      string   `json:"department,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
+	ComparisonType  string   `json:"comparison_type,omitempty"` // "greater_than", "less_than", etc.
+	ComparisonValue int      `json:"comparison_value,omitempty"`
+	LeaveTypes      []string `json:"leave_types,omitempty"` // Types: "WFH", "FULL_DAY", etc.
+	GroupBy         string   `json:"group_by,omitempty"`    // "day", "week", "month"
+	Metrics         Metrics  `json:"metrics,omitempty"`     // Update to use the new Metrics struct
+	Error           string   `json:"error,omitempty"`       // Error messages
+	Suggestion      string   `json:"suggestion,omitempty"`  // New field for suggestions
+}
+
+type Statistics struct {
+	TotalLeaves      int     `json:"total_leaves"`
+	AverageLeaveDays float64 `json:"average_leave_days"`
+	MostLeavesUser   string  `json:"most_leaves_user,omitempty"`
+	HighestWFHUser   string  `json:"highest_wfh_user,omitempty"`
+	MostLateArrivals string  `json:"most_late_arrivals,omitempty"`
+	TotalEarlyDepart int     `json:"total_early_depart"`
+}
 
 type LeaveResponse struct {
 	IsValid   bool      `json:"is_valid"`
@@ -22,14 +54,6 @@ type LeaveResponse struct {
 	Error     string    `json:"error,omitempty"` // Add error field for validation messages
 }
 
-type QueryResponse struct {
-	QueryType string    `json:"query_type"` // "top_employee", "period_stats", "employee_stats", etc.
-	StartDate time.Time `json:"start_date"` // For period-based queries
-	EndDate   time.Time `json:"end_date"`   // For period-based queries
-	Username  string    `json:"username"`   // For employee-specific queries
-	Error     string    `json:"error"`      // Any parsing errors
-}
-
 type OpenAIService struct {
 	client *openai.Client
 	log    *log.Logger
@@ -39,6 +63,140 @@ func NewOpenAIService(apiKey string) *OpenAIService {
 	return &OpenAIService{
 		client: openai.NewClient(apiKey),
 		log:    log.New(os.Stdout, "🤖 OPENAI  | ", log.Ltime),
+	}
+}
+
+func (s *OpenAIService) ParseQuery(query string) (*QueryResponse, error) {
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	now := time.Now().In(loc)
+
+	// Updated prompt with better clarity and validation instructions
+	prompt := fmt.Sprintf(`
+Analyze this leave/attendance query and return a structured JSON response.
+
+Query: "%s"
+Current time: %s
+
+### 🔍 Examples of Correct Queries:
+- "Who took the most leave this month?"
+- "How many people worked from home last week?"
+- "Show WFH trends over the past year."
+- "Which department has the most WFH employees?"
+
+### 📌 Important Rules:
+1. **Always return valid JSON** with all required fields.
+2. **Detect and correct misspellings** in queries where possible.
+3. If the query is **invalid or ambiguous**, return a **valid suggestion** in the 'suggestion' field.
+4. If a query references a **future date or untracked data**, return {"error": "Invalid query"} and a **possible fix**.
+5. **NEVER include markdown, bullet points, or extra text**, only return structured JSON.
+
+#### 📜 JSON Output Format:
+{
+	"query_type": REQUIRED,
+	"analysis_subtype": REQUIRED,
+	"start_date": optional,
+	"end_date": optional,
+	"username": optional,
+	"department": optional,
+	"limit": optional,
+	"comparison_type": optional,
+	"comparison_value": optional,
+	"leave_types": optional,
+	"group_by": optional,
+	"metrics": optional,
+	"error": optional,
+	"suggestion": optional
+}`, query, now.Format(time.RFC3339))
+
+	resp, err := s.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: "gpt-4o-mini",
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: "You are an AI trained to process attendance queries and return structured JSON. Never return markdown, code blocks, or plain text.",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: prompt,
+				},
+			},
+			Temperature: 0.3, // Lower temp for more consistent responses
+		},
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %v", err)
+	}
+
+	// Clean response from AI
+	content := strings.TrimSpace(resp.Choices[0].Message.Content)
+	content = strings.ReplaceAll(content, "```json", "")
+	content = strings.ReplaceAll(content, "```", "")
+
+	s.log.Printf("Raw OpenAI response: %s", content)
+
+	// Parse JSON response
+	var queryResp QueryResponse
+	if err := json.Unmarshal([]byte(content), &queryResp); err != nil {
+		return nil, fmt.Errorf("JSON parse error: %v\nResponse: %s", err, content)
+	}
+
+	// If an error exists in the response, handle it properly
+	if queryResp.Error != "" {
+		s.log.Printf("Query error detected: %s", queryResp.Error)
+		// Suggest a corrected query if available
+		if queryResp.Suggestion != "" {
+			return nil, fmt.Errorf("Query error: %s. Suggested fix: %s", queryResp.Error, queryResp.Suggestion)
+		}
+		return nil, fmt.Errorf("Query error: %s", queryResp.Error)
+	}
+
+	// If no results are found, provide a meaningful response
+	if queryResp.Metrics.Count == "0" {
+		return &queryResp, fmt.Errorf("No results found for the query: %s. Please try a different query.", query)
+	}
+
+	return &queryResp, nil
+}
+
+func GetStatistics(prompt string) (Statistics, error) {
+	if prompt == "" {
+		return Statistics{}, errors.New("query cannot be empty")
+	}
+
+	result, err := queryDatabaseForStatistics(prompt)
+	if err != nil {
+		return Statistics{}, err
+	}
+
+	if len(result) == 0 {
+		return Statistics{}, errors.New("no statistics found for the given query")
+	}
+
+	return processStatistics(result), nil
+}
+
+func queryDatabaseForStatistics(prompt string) ([]Statistics, error) {
+	var results []Statistics
+	// Implement database query logic here
+	return results, nil
+}
+
+func processStatistics(result []Statistics) Statistics {
+	if len(result) == 0 {
+		return Statistics{}
+	}
+
+	totalLeaves := 0
+	for _, stat := range result {
+		totalLeaves += stat.TotalLeaves
+	}
+
+	return Statistics{
+		TotalLeaves:      totalLeaves,
+		AverageLeaveDays: float64(totalLeaves) / float64(len(result)),
 	}
 }
 
@@ -170,72 +328,4 @@ func (s *OpenAIService) ParseLeaveRequest(text, timestamp string) (*LeaveRespons
 	leaveResp.EndTime = leaveResp.EndTime.In(loc)
 
 	return &leaveResp, nil
-}
-
-func (s *OpenAIService) ParseQuery(query string) (*QueryResponse, error) {
-	loc, _ := time.LoadLocation("Asia/Kolkata")
-	now := time.Now().In(loc)
-
-	prompt := `Parse this leave statistics query and categorize it. Return a raw JSON object without any formatting.
-
-	Query: "` + query + `"
-	Current time: ` + now.Format(time.RFC3339) + `
-
-	Understand natural language queries like:
-	- "Who has taken the most leaves?"
-	- "Show me leave stats for last month"
-	- "How many leaves did John take?"
-	- "Give me the top 3 employees with most leaves"
-
-	IMPORTANT: Return ONLY the raw JSON object. Do not wrap it in code blocks. Do not use backticks. Do not use markdown.
-	BAD: { ... } in code blocks
-	GOOD: { ... }
-
-	Return a JSON object with these fields:
-	{
-		"query_type": one of ["top_employee", "period_stats", "employee_stats"],
-		"start_date": "2024-03-01T00:00:00+05:30",  // Optional, for period queries
-		"end_date": "2024-03-31T23:59:59+05:30",    // Optional, for period queries
-		"username": "john.doe",                      // Optional, for employee specific queries
-		"error": "error message if query cannot be understood"
-	}`
-
-	resp, err := s.client.CreateChatCompletion(
-		context.Background(),
-		openai.ChatCompletionRequest{
-			Model: "gpt-4o-mini",
-			Messages: []openai.ChatCompletionMessage{
-				{
-					Role:    openai.ChatMessageRoleSystem,
-					Content: "You are a JSON-only response bot. You must return raw JSON without any formatting, markdown, or code blocks. Never wrap JSON in backticks.",
-				},
-				{
-					Role:    openai.ChatMessageRoleUser,
-					Content: prompt,
-				},
-			},
-			Temperature: 0.1,
-		},
-	)
-
-	if err != nil {
-		return nil, fmt.Errorf("OpenAI API error: %v", err)
-	}
-
-	content := resp.Choices[0].Message.Content
-	content = strings.ReplaceAll(content, "```json", "")
-	content = strings.ReplaceAll(content, "```", "")
-	content = strings.ReplaceAll(content, "`", "")
-	content = strings.ReplaceAll(content, "\n", "")
-	content = strings.ReplaceAll(content, "\r", "")
-	content = strings.TrimSpace(content)
-
-	s.log.Printf("Cleaned response: %s", content)
-
-	var queryResp QueryResponse
-	if err := json.Unmarshal([]byte(content), &queryResp); err != nil {
-		return nil, fmt.Errorf("JSON parse error: %v\nResponse: %s", err, content)
-	}
-
-	return &queryResp, nil
 }
